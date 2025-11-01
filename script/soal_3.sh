@@ -1,114 +1,133 @@
-## 🎯 Tujuan  
-Membuat sistem **Forward Proxy (Squid)** pada **Minastir** yang akan menjadi penghubung akses internet untuk seluruh klien melalui **Durin** sebagai router/NAT.  
-Seluruh koneksi HTTP/HTTPS dari klien hanya diizinkan lewat proxy Minastir (port 8080).
+#!/bin/sh
+# SOAL 3 — Kontrol arus informasi via MINASTIR (DNS Forwarder)
+# Gunakan file ini sebagai CHECKLIST. Jalankan SETIAP BARIS di node yang disebut.
+# Asumsi: Soal 1 (routing+NAT Durin) dan Soal 2 (DHCP Server+Relay) SUDAH OK.
+# IP penting:
+#   Minastir = 192.214.5.2
+#   Durin WAN = 192.168.122.2   (WAN network 192.168.122.0/24)
+#   DNS upstream lab = 192.168.122.1
 
----
+############################################################
+# 1) MINASTIR — JADIKAN DNS FORWARDER (UNBOUND)
+############################################################
 
-## ⚙️ Langkah Konfigurasi
-
-### 🖥️ 1. Minastir – Proxy Server (Squid)
-
-#### 🔹 Instalasi Squid
-```bash
+# [Minastir] Install unbound
 apt-get update
-apt-get install -y squid
-```
+apt-get install -y unbound
 
-#### Backup dan Edit Konfigurasi
-```bash
-cp /etc/squid/squid.conf /etc/squid/squid.conf.bak
-nano /etc/squid/squid.conf
-```
-Tambahkan atau ubah konfigurasi berikut:
-```conf
-http_port 8080
-visible_hostname minastir.k06
+# [Minastir] Backup config (opsional)
+cp /etc/unbound/unbound.conf /etc/unbound/unbound.conf.bak 2>/dev/null || true
 
-# ACL jaringan lokal
-acl localnet src 192.214.0.0/16
-
-# Port aman (HTTPS)
-acl SSL_ports port 443
-acl Safe_ports port 80 443 21 70 210 280 488 591 777 1025-65535
-acl CONNECT method CONNECT
-
-# Izin akses untuk jaringan lokal saja
-http_access allow localnet
-http_access deny all
-
-# Pengaturan cache
-cache_mem 64 MB
-maximum_object_size 32 MB
-cache_dir ufs /var/spool/squid 100 16 256
-```
-
-#### Jalankan dan Verifikasi
-```bash
-systemctl restart squid 2>/dev/null || service squid restart || /etc/init.d/squid restart
-ss -ltnp | grep 8080
-````
-
-# Durin – Router dan NAT
-#### Aktifkan IP Forwarding
-```bash
-echo 1 > /proc/sys/net/ipv4/ip_forward
-iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
-````
-#### Atur Firewall Untuk Akses Proxy Saja
-```bash
-# Izinkan klien ke proxy Minastir (port 8080)
-iptables -A FORWARD -s 192.214.0.0/16 -d 192.214.5.2 -p tcp --dport 8080 -j ACCEPT
-
-# Izinkan Minastir keluar ke internet
-iptables -A FORWARD -s 192.214.5.2 -o eth0 -j ACCEPT
-
-# Blokir akses langsung HTTP/HTTPS dari klien
-iptables -A FORWARD -s 192.214.0.0/16 -o eth0 -p tcp -m multiport --dports 80,443 -j REJECT
-
-# Izinkan DNS supaya klien bisa resolve domain
-iptables -A FORWARD -s 192.214.0.0/16 -p udp --dport 53 -j ACCEPT
-iptables -A FORWARD -s 192.214.0.0/16 -p tcp --dport 53 -j ACCEPT
-```
-
-### Simpan Aturan
-```bash
-apt-get install -y iptables-persistent
-mkdir -p /etc/iptables
-iptables-save > /etc/iptables/rules.v4
-```
-
-# Amandil & Gilgalad – Klien Proxy
-### Atur DNS
-```bash
-echo "nameserver 192.168.122.1" > /etc/resolv.conf
-```
-### Tes Tanpa Proxy (Harus Gagal)
-```bash
-curl -I http://deb.debian.org
-curl -I https://example.com
-```
-### Tes Dengan Proxy (harus berhasil)
-```bash
-export http_proxy=http://192.214.5.2:8080
-export https_proxy=http://192.214.5.2:8080
-
-curl -I http://deb.debian.org
-curl -I https://example.com
-```
-### Set Proxy Permanen
-```bash
-echo 'http_proxy=http://192.214.5.2:8080'  >> /etc/environment
-echo 'https_proxy=http://192.214.5.2:8080' >> /etc/environment
-````
-### Atur Proxy Untuk APT
-```bash
-cat > /etc/apt/apt.conf.d/80proxy <<'EOF'
-Acquire::http::Proxy "http://192.214.5.2:8080";
-Acquire::https::Proxy "http://192.214.5.2:8080";
+# [Minastir] Tulis konfigurasi forwarder
+cat > /etc/unbound/unbound.conf <<'EOF'
+server:
+  interface: 0.0.0.0
+  access-control: 192.214.0.0/16 allow
+  verbosity: 1
+  hide-identity: yes
+  hide-version: yes
+forward-zone:
+  name: "."
+  forward-addr: 192.168.122.1
 EOF
-```
-### Pengujian
-```
-curl -I http://deb.debian.org        # Harus gagal tanpa proxy
-curl -I -x 192.214.5.2:8080 http://deb.debian.org  # Harus berhasil
-```
+
+# [Minastir] Jalankan unbound (tanpa systemd)
+pkill unbound 2>/dev/null || true
+unbound -d -c /etc/unbound/unbound.conf >/var/log/unbound.log 2>&1 &
+sleep 1
+
+# [Minastir] CEK: service & resolusi
+ss -lunp | grep ':53 '
+dig +short -4 debian.org @127.0.0.1
+
+
+############################################################
+# 2) ALDARION — DHCP ARAHKAN DNS KLIEN → MINASTIR
+############################################################
+
+# [Aldarion] Ubah option DNS global
+sed -i 's/^option domain-name-servers .*/option domain-name-servers 192.214.5.2;/' /etc/dhcp/dhcpd.conf
+
+# [Aldarion] Uji sintaks DHCP
+dhcpd -t -4 -cf /etc/dhcp/dhcpd.conf
+
+# [Aldarion] Pastikan file lease ada
+test -f /var/lib/dhcp/dhcpd.leases || install -m 644 -o root -g root /dev/null /var/lib/dhcp/dhcpd.leases
+
+# [Aldarion] Restart dhcpd (tanpa systemd)
+pkill dhcpd 2>/dev/null
+dhcpd -4 -q -cf /etc/dhcp/dhcpd.conf -pf /run/dhcpd.pid eth0 &
+sleep 1
+
+# [Aldarion] CEK: proses & port
+ps aux | grep '[d]hcpd'
+ss -lunp | grep ':67 '
+
+
+############################################################
+# 3) DURIN — IPTABLES: PAKSA SEMUA DNS LEWAT MINASTIR
+############################################################
+
+# [Durin] Variabel cepat
+MINASTIR=192.214.5.2
+UPSTREAM=192.168.122.0/24
+
+# [Durin] Hapus DROP yang terlalu luas (abaikan error jika tidak ada)
+iptables -D FORWARD ! -s $MINASTIR -p udp --dport 53 -j DROP 2>/dev/null || true
+iptables -D FORWARD ! -s $MINASTIR -p tcp --dport 53 -j DROP 2>/dev/null || true
+
+# [Durin] IZINKAN: klien → Minastir (DNS)
+iptables -I FORWARD 1 -d $MINASTIR -p udp --dport 53 -j ACCEPT
+iptables -I FORWARD 2 -d $MINASTIR -p tcp --dport 53 -j ACCEPT
+
+# [Durin] IZINKAN: Minastir → upstream (DNS)
+iptables -C FORWARD -s $MINASTIR -p udp --dport 53 -j ACCEPT 2>/dev/null || \
+iptables -A FORWARD -s $MINASTIR -p udp --dport 53 -j ACCEPT
+iptables -C FORWARD -s $MINASTIR -p tcp --dport 53 -j ACCEPT 2>/dev/null || \
+iptables -A FORWARD -s $MINASTIR -p tcp --dport 53 -j ACCEPT
+
+# [Durin] BLOKIR: klien bypass DNS langsung ke WAN
+iptables -C FORWARD ! -s $MINASTIR -d $UPSTREAM -p udp --dport 53 -j DROP 2>/dev/null || \
+iptables -A FORWARD ! -s $MINASTIR -d $UPSTREAM -p udp --dport 53 -j DROP
+iptables -C FORWARD ! -s $MINASTIR -d $UPSTREAM -p tcp --dport 53 -j DROP 2>/dev/null || \
+iptables -A FORWARD ! -s $MINASTIR -d $UPSTREAM -p tcp --dport 53 -j DROP
+
+# [Durin] CEK aturan aktif
+iptables -S FORWARD | nl
+
+
+############################################################
+# 4) KLIEN — RENEW DHCP & VERIFIKASI (AMANDIL & GILGALAD)
+############################################################
+
+# [Klien] Renew DHCP (pastikan iface eth0 mode dhcp)
+ip addr flush dev eth0
+rm -f /var/lib/dhcp/dhclient*.leases 2>/dev/null
+dhclient -v -r eth0
+dhclient -v eth0
+
+# [Klien] CEK: resolver harus 192.214.5.2
+cat /etc/resolv.conf
+
+# [Klien] CEK: konektivitas via DNS Minastir
+ping -4 -c 3 debian.org
+
+
+############################################################
+# 5) OPSIONAL — UJI BYPASS (BUKTI WAJIB LEWAT MINASTIR)
+############################################################
+
+# [Klien] Paksa resolver ke 192.168.122.1 → seharusnya GAGAL (diblok Durin)
+printf "nameserver 192.168.122.1\n" > /etc/resolv.conf
+ping -4 -c 3 debian.org
+
+# [Klien] Kembalikan ke Minastir → sukses lagi
+printf "nameserver 192.214.5.2\n" > /etc/resolv.conf
+ping -4 -c 3 debian.org
+
+# — SELESAI —
+# Soal 3 dianggap LULUS jika:
+#  - Minastir listen :53 dan resolve OK
+#  - Klien menerima nameserver 192.214.5.2 dari DHCP
+#  - Durin mengizinkan DNS klien→Minastir & Minastir→upstream, serta memblok bypass
+#  - Klien bisa ping domain saat pakai Minastir, dan gagal saat bypass resolver WAN

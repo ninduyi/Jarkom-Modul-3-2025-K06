@@ -132,3 +132,4 @@ nslookup google.com
 
 # 3. Tes ke slave (Amdir)
 nslookup palantir.K06.com 192.214.3.4
+

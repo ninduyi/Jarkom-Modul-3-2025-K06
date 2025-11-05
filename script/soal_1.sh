@@ -48,7 +48,7 @@ iface eth0 inet static
 # anarion
 auto eth0
 iface eth0 inet static
-    address 192.214.1.2
+    address 192.214.1.4
     netmask 255.255.255.0
     gateway 192.214.1.1
     up echo nameserver 192.168.122.1 > /etc/resolv.conf
@@ -182,3 +182,13 @@ iface eth0 inet static
     netmask 255.255.255.0
     gateway 192.214.2.1
     up echo nameserver 192.168.122.1 > /etc/resolv.conf
+
+
+############################################################
+# Cek ping google
+# Cek elendil ke isildur
+ping 192.214.1.3 -c 3
+
+# Elendil ke Galadriel
+# Dari Elendil (192.214.1.2)
+ping 192.214.2.5 -c 3
